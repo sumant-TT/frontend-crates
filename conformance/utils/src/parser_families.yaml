@@ -312,7 +312,7 @@ unified:
     golden_spec: gpt_oss.yaml
     leak_markers: []
   qwen3:
-    capture_pipelines:
+    capture_pipelines: &qwen_unified_pipelines
       vllm_python: ["qwen3", "qwen3_coder"]
       sglang_python: ["qwen3", "qwen3_coder"]
       dynamo_v1: ["qwen3", "qwen3_coder"]
@@ -337,6 +337,240 @@ unified:
     tool_parser: qwen3_coder
     golden_spec: nemotron_v3.yaml
     leak_markers: *qwen_unified_leaks
+
+  deepseek_v3:
+    registry: deepseek_v3
+    native: false
+    scenario_profile: native
+    reasoning_parser: deepseek_v3
+    tool_parser: deepseek_v3
+    golden_spec: deepseek_v3.yaml
+    leak_markers: []
+    capture_pipelines:
+      dynamo_v1:
+      - deepseek_v3
+      - deepseek_v3
+    reasoning_grammar: think
+  deepseek_v3_1:
+    registry: deepseek_v3_1
+    native: false
+    scenario_profile: native
+    reasoning_parser: deepseek_v3_1
+    tool_parser: deepseek_v3_1
+    golden_spec: deepseek_v3_1.yaml
+    leak_markers: []
+    capture_pipelines:
+      dynamo_v1:
+      - deepseek_v3_1
+      - deepseek_v3_1
+    reasoning_grammar: think
+  deepseek_v3_2:
+    registry: deepseek_v3_2
+    native: false
+    scenario_profile: native
+    reasoning_parser: deepseek_v3_2
+    tool_parser: deepseek_v3_2
+    golden_spec: deepseek_v3_2.yaml
+    leak_markers: []
+    capture_pipelines:
+      dynamo_v1:
+      - deepseek_v3_2
+      - deepseek_v3_2
+    reasoning_grammar: think
+  hermes:
+    registry: hermes
+    native: false
+    scenario_profile: native
+    reasoning_parser: basic
+    tool_parser: hermes
+    golden_spec: hermes.yaml
+    leak_markers: []
+    capture_pipelines:
+      dynamo_v1:
+      - basic
+      - hermes
+    reasoning_grammar: think
+  inkling:
+    registry: inkling
+    native: false
+    scenario_profile: native
+    reasoning_parser: inkling
+    tool_parser: inkling
+    golden_spec: inkling.yaml
+    leak_markers: []
+    capture_pipelines:
+      dynamo_v1:
+      - inkling
+      - inkling
+    reasoning_grammar: inkling
+  jamba:
+    registry: jamba
+    native: false
+    scenario_profile: native
+    reasoning_parser: basic
+    tool_parser: jamba
+    golden_spec: jamba.yaml
+    leak_markers: []
+    capture_pipelines:
+      dynamo_v1:
+      - basic
+      - jamba
+    reasoning_grammar: none
+  llama3_json:
+    registry: llama3_json
+    native: false
+    scenario_profile: native
+    reasoning_parser: basic
+    tool_parser: llama3_json
+    golden_spec: llama3_json.yaml
+    leak_markers: []
+    capture_pipelines:
+      dynamo_v1:
+      - basic
+      - llama3_json
+    reasoning_grammar: none
+  minimax_m2:
+    registry: minimax_m2
+    native: false
+    scenario_profile: native
+    reasoning_parser: minimax_m2
+    tool_parser: minimax_m2
+    golden_spec: minimax_m2.yaml
+    leak_markers: []
+    capture_pipelines:
+      dynamo_v1:
+      - minimax_m2
+      - minimax_m2
+    reasoning_grammar: think
+  minimax_m3:
+    registry: minimax_m3
+    native: false
+    scenario_profile: native
+    reasoning_parser: minimax_m3
+    tool_parser: minimax_m3
+    golden_spec: minimax_m3.yaml
+    leak_markers: []
+    capture_pipelines:
+      dynamo_v1:
+      - minimax_m3
+      - minimax_m3
+    reasoning_grammar: minimax_m3
+  mistral:
+    registry: mistral
+    native: false
+    scenario_profile: native
+    reasoning_parser: mistral
+    tool_parser: mistral
+    golden_spec: mistral.yaml
+    leak_markers: []
+    capture_pipelines:
+      dynamo_v1:
+      - mistral
+      - mistral
+    reasoning_grammar: mistral
+  nemotron_deci:
+    registry: nemotron_deci
+    native: false
+    scenario_profile: native
+    reasoning_parser: nemotron_deci
+    tool_parser: nemotron_deci
+    golden_spec: nemotron_deci.yaml
+    leak_markers: []
+    capture_pipelines:
+      dynamo_v1:
+      - nemotron_deci
+      - nemotron_deci
+    reasoning_grammar: think
+  nemotron_nano:
+    registry: nemotron_nano
+    native: false
+    scenario_profile: native
+    reasoning_parser: nemotron_nano
+    tool_parser: nemotron_nano
+    golden_spec: nemotron_nano.yaml
+    leak_markers: []
+    capture_pipelines:
+      dynamo_v1:
+      - nemotron_nano
+      - nemotron_nano
+    reasoning_grammar: think
+  phi4:
+    registry: phi4
+    native: false
+    scenario_profile: native
+    reasoning_parser: basic
+    tool_parser: phi4
+    golden_spec: phi4.yaml
+    leak_markers: []
+    capture_pipelines:
+      dynamo_v1:
+      - basic
+      - phi4
+    reasoning_grammar: none
+  pythonic:
+    registry: pythonic
+    native: false
+    scenario_profile: native
+    reasoning_parser: basic
+    tool_parser: pythonic
+    golden_spec: pythonic.yaml
+    leak_markers: []
+    capture_pipelines:
+      dynamo_v1:
+      - basic
+      - pythonic
+    reasoning_grammar: none
+  qwen25:
+    registry: qwen25
+    native: false
+    scenario_profile: native
+    reasoning_parser: qwen3
+    tool_parser: qwen25
+    golden_spec: qwen25.yaml
+    leak_markers: []
+    capture_pipelines:
+      dynamo_v1:
+      - qwen3
+      - qwen25
+    reasoning_grammar: think
+  harmony_text:
+    registry: harmony_text
+    native: false
+    scenario_profile: native
+    reasoning_parser: gpt_oss
+    tool_parser: harmony
+    golden_spec: harmony_text.yaml
+    leak_markers: []
+    capture_pipelines:
+      dynamo_v1:
+      - gpt_oss
+      - harmony
+    reasoning_grammar: harmony
+
+  harmony:
+    registry: harmony
+    native: false
+    scenario_profile: native
+    reasoning_grammar: harmony
+    reasoning_parser: gpt_oss
+    tool_parser: harmony
+    golden_spec: harmony.yaml
+    leak_markers: []
+    capture_pipelines:
+      dynamo_v1:
+      - gpt_oss
+      - harmony
+  qwen3_coder:
+    registry: qwen3_coder
+    native: true
+    scenario_profile: native
+    reasoning_grammar: think
+    reasoning_parser: qwen3
+    tool_parser: qwen3_coder
+    golden_spec: qwen3_coder.yaml
+    leak_markers: []
+    vllm_tokenizer_markers: *qwen_unified_tokens
+    capture_pipelines: *qwen_unified_pipelines
 
 # Report identities for recorded peer pipelines. `impl` groups the comparison slots.
 unified_peer_sources:
@@ -366,7 +600,6 @@ unified_batch:
     source: dynamo_v1
     source_blockers:
       9.2.13: *missing_dynamo_release
-      3.0.0: "Jail producer source unavailable: published dynamo-parsers 3.0.0 contains no JailedStream; a matching historical external jail wrapper has not been established."
   vllm_python_batch: {source: vllm_python}
   sglang_python_batch: {source: sglang_python}
 
@@ -376,6 +609,7 @@ unified_display:
   comparison_slot_engines: [dynamo, sglang, vllm]
   comparison_languages: [python, rust]
   group_labels:
+    v1_split: V1 parser cases
     1: TC Single call
     2: TC Multiple calls
     3: TC No call

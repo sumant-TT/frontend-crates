@@ -7,6 +7,7 @@ members = [
     "renderer",
     "tokenizers",
     "conformance",
+    "conformance/publisher",
     "multimodal",
     "parsers/v2",
     "parsers/v2-py",
