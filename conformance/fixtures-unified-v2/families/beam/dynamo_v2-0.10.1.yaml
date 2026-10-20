@@ -1,0 +1,57 @@
+provenance:
+  status: captured
+  origin:
+    crate_version: 0.10.1
+    git_commit: fcd22e37a55cb28714e4c3fd57323a87705c1830
+    source_sha256: e3e16142573b2fe6254e71c73a13f2fe1d4a81481617a71f8ceed737a15d6cc5
+document:
+  mode: unified
+changes:
+  tool_no_close:
+    case_key: UNIFIED.5-tool_no_close
+    observation:
+      value:
+        assembled:
+        - kind: tool_call
+          name: get_weather
+          arguments:
+            city: Paris
+        chunks:
+        - expected: []
+        - expected: []
+        - expected: []
+        - expected: []
+        - expected: []
+        - expected: []
+        - expected: []
+        - expected:
+          - kind: tool_call
+            name: get_weather
+            arguments: '{"city": "'
+            complete: false
+        - expected:
+          - kind: tool_call
+            name: null
+            arguments: Paris
+            complete: false
+        - expected:
+          - kind: tool_call
+            name: null
+            arguments: '"'
+            complete: false
+        - expected:
+          - kind: tool_call
+            name: null
+            arguments: '}'
+            complete: true
+metadata_changes: {}
+document_overrides:
+  tool_no_close:
+    capture_provenance:
+      captured_with:
+        dynamo_v2: 0.10.1
+      capture_origin:
+        crate_version: 0.10.1
+        source_sha256: e3e16142573b2fe6254e71c73a13f2fe1d4a81481617a71f8ceed737a15d6cc5
+        git_commit: fcd22e37a55cb28714e4c3fd57323a87705c1830
+      inherited_from: null

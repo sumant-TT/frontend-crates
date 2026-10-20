@@ -28,6 +28,10 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 const PARAM_OPEN: &str = "<rfl:parameter name=\"";
 const PARAM_CLOSE: &str = "</rfl:parameter>";
+/// The serving grammar lets every parameter but the last end by opening the next one
+/// (`\n<rfl:parameter name="`) without writing its closer; the newline is the value's
+/// framing newline and the opener belongs to the next parameter.
+pub(crate) const PARAM_FOLLOW: &str = "\n<rfl:parameter name=\"";
 
 /// Why a Beam body or header could not be decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,30 +62,22 @@ impl std::fmt::Display for BeamBodyError {
 
 impl std::error::Error for BeamBodyError {}
 
-/// `[a-zA-Z_][a-zA-Z0-9_.-]*`
+/// A recipient (tool name) in a call header: `[A-Za-z0-9_.-]+`, the one name contract
+/// the structural-tag builder holds declared tools to (`name_encodable`), so a call the
+/// grammar admits for a declared tool (`2fa_check`, `-tool`) is never dropped here.
 pub fn is_valid_recipient(name: &str) -> bool {
-    let mut chars = name.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    !name.is_empty() && recipient_len(name) == name.len()
+}
+
+/// Whether `c` may appear anywhere in a recipient.
+pub(crate) fn is_recipient_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')
 }
 
 /// Length of the longest valid recipient prefix of `text` (0 when none).
 pub fn recipient_len(text: &str) -> usize {
-    let mut end = 0;
-    for (i, c) in text.char_indices() {
-        let ok = if i == 0 {
-            c.is_ascii_alphabetic() || c == '_'
-        } else {
-            c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')
-        };
-        if !ok {
-            break;
-        }
-        end = i + c.len_utf8();
-    }
-    end
+    text.find(|c: char| !is_recipient_char(c))
+        .unwrap_or(text.len())
 }
 
 /// How far a JSON value that has STARTED at byte zero of `text` has got.
@@ -277,23 +273,46 @@ pub(crate) fn value_framing(
 ///
 /// `SchemaConstrained` is resolved per key by [`value_framing`] BEFORE this call; passed
 /// here directly (no key metadata) it is the raw-text rule.
+#[cfg(test)]
 pub(crate) fn param_value_end(after_key: &str, framing: ArgumentFraming) -> Option<usize> {
+    param_value_span(after_key, framing).map(|(end, _)| end)
+}
+
+/// Where a parameter region ends: `(value_end, next)` with the raw value (framing
+/// newlines included) in `after_key[..value_end]` and the body resuming at `next`, or
+/// `None` while the value is still open.
+///
+/// A value ends at its `</rfl:parameter>`, or, as the serving grammar admits for every
+/// parameter but the last, where the next parameter opens (`\n<rfl:parameter name="`):
+/// the newline is the value's framing newline and the opener is read again as the next
+/// parameter. Whichever comes first ends the value; under `ConstrainedJson` both are
+/// looked for only after the JSON value the parameter opened with.
+pub(crate) fn param_value_span(
+    after_key: &str,
+    framing: ArgumentFraming,
+) -> Option<(usize, usize)> {
+    let mut from = 0;
     if framing == ArgumentFraming::ConstrainedJson {
         let lead = after_key.len() - after_key.trim_start_matches(['\n', ' ', '\t', '\r']).len();
         if after_key[lead..].starts_with(['"', '{', '[']) {
             match json_span(&after_key[lead..]) {
-                JsonSpan::Complete(json_end) => {
-                    let from = lead + json_end;
-                    return after_key[from..]
-                        .find(PARAM_CLOSE)
-                        .map(|close| from + close);
-                }
+                JsonSpan::Complete(json_end) => from = lead + json_end,
                 JsonSpan::Open => return None,
                 JsonSpan::Invalid => {}
             }
         }
     }
-    after_key.find(PARAM_CLOSE)
+    let rest = &after_key[from..];
+    let close = rest
+        .find(PARAM_CLOSE)
+        .map(|c| (from + c, from + c + PARAM_CLOSE.len()));
+    let follow = rest
+        .find(PARAM_FOLLOW)
+        .map(|f| (from + f + 1, from + f + 1));
+    match (close, follow) {
+        (Some(close), Some(follow)) if follow.0 <= close.0 => Some(follow),
+        (close, follow) => close.or(follow),
+    }
 }
 
 /// The reference template's `\n?VALUE\n?`: exactly one framing newline on each side.
@@ -367,7 +386,7 @@ fn parse_parameters_by(
         };
         let key = &after_open[..key_end];
         let framing = framing_for(key);
-        let Some(value_end) = param_value_end(after_key, framing) else {
+        let Some((value_end, next)) = param_value_span(after_key, framing) else {
             // A parameter that never closes is malformed in every reading: the builder's
             // contract rejects a partial call rather than serving the parameters around it.
             return Err(BeamBodyError::UnclosedParameter { offset: at });
@@ -377,7 +396,7 @@ fn parse_parameters_by(
             Some(slot) => slot.1 = value.to_string(),
             None => out.push((key.to_string(), value.to_string())),
         }
-        at += PARAM_OPEN.len() + key_end + 2 + value_end + PARAM_CLOSE.len();
+        at += PARAM_OPEN.len() + key_end + 2 + next;
     }
 }
 
@@ -921,7 +940,10 @@ pub(crate) fn arguments_json_with(
 #[cfg(test)]
 mod tests {
     use super::recipient_len;
-    use super::{ArgumentFraming, BeamBodyError, PyDict, PyValue, Tool, is_valid_recipient};
+    use super::{
+        ArgumentFraming, BeamBodyError, PARAM_CLOSE, PARAM_OPEN, PyDict, PyValue, Tool,
+        is_valid_recipient, unframe,
+    };
     use serde_json::json;
 
     fn parse_parameters(body: &str) -> Result<Vec<(String, String)>, BeamBodyError> {
@@ -1340,13 +1362,59 @@ mod tests {
 
     #[test]
     fn recipient_grammar() {
-        for ok in ["weather", "_x", "a.b-c9", "functions.get_weather"] {
+        // The builder's name contract: digit-, hyphen- and dot-leading names included.
+        for ok in [
+            "weather",
+            "_x",
+            "a.b-c9",
+            "functions.get_weather",
+            "2fa_check",
+            "-tool",
+            ".a",
+        ] {
             assert!(is_valid_recipient(ok), "{ok}");
         }
-        for bad in ["", "9a", "-a", ".a", "a b", "é"] {
+        for bad in ["", "a b", "a\tb", "a<b", "a<|channel|>", "é", "[{\"name\""] {
             assert!(!is_valid_recipient(bad), "{bad}");
         }
         assert_eq!(recipient_len("get_weather<|channel|>"), 11);
+        assert_eq!(recipient_len("2fa_check<|channel|>"), 9);
+        assert_eq!(recipient_len(" x"), 0);
+    }
+
+    #[test]
+    fn a_value_may_end_where_the_next_parameter_opens() {
+        use super::param_value_span;
+        let lenient = ArgumentFraming::Lenient;
+        // Implicit boundary: the value keeps its framing newline, the body resumes at
+        // the opener.
+        let body = "\nA\n<rfl:parameter name=\"b\">\nB\n</rfl:parameter>";
+        assert_eq!(param_value_span(body, lenient), Some((3, 3)));
+        assert_eq!(unframe(&body[..3]), "A");
+        assert!(body[3..].starts_with(PARAM_OPEN));
+        // An explicit closer that comes first still wins and is consumed.
+        let closed = "\nA\n</rfl:parameter>\n<rfl:parameter name=\"b\">";
+        assert_eq!(
+            param_value_span(closed, lenient),
+            Some((3, 3 + PARAM_CLOSE.len()))
+        );
+        // Both decoders read the same two parameters either way.
+        let tools = vec![Tool {
+            name: "t".into(),
+            description: None,
+            parameters: json!({"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}}),
+            strict: None,
+        }];
+        for body in [
+            "<rfl:parameter name=\"a\">\nA\n<rfl:parameter name=\"b\">\nB\n</rfl:parameter>",
+            "<rfl:parameter name=\"a\">\nA\n</rfl:parameter><rfl:parameter name=\"b\">\nB\n</rfl:parameter>",
+        ] {
+            assert_eq!(
+                arguments_json(body, "t", &tools).unwrap(),
+                r#"{"a": "A", "b": "B"}"#,
+                "{body}"
+            );
+        }
     }
 
     #[test]

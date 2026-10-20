@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-10-20
+
+### Fixed
+
+- *(parsers-v2)* Beam reads every call its serving grammar admits: a parameter may end
+  where the next one opens (no closer), tool names follow one builder/parser contract
+  (`[A-Za-z0-9_.-]+`, so `2fa_check` and `-tool` parse), and a body of complete
+  parameters at the end of the stream completes the call. `tool_no_close` is now a call
+  for Beam, as for the other families.
+
 ## [0.10.0] - 2026-10-13
 
 ### Added

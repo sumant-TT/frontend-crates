@@ -7869,7 +7869,11 @@ cases:
       - delta_text: </rfl:parameter>
       - delta_text: ‹finish›
     golden:
-      assembled: []
+      assembled:
+      - kind: tool_call
+        name: get_weather
+        arguments:
+          city: Paris
   tool_only:
     lifecycle: active
     scenario: tool_only

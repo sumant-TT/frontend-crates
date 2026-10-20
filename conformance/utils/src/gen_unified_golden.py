@@ -2672,8 +2672,8 @@ def _beam_edge_entries():
         "tool_no_close": (
             _beam_header() + _beam_param("city", "Paris"),
             unavailable,
-            note("a Beam call dispatches only once its terminator arrives; without one the complete body is dropped, never emitted"),
-            [],
+            note("the serving grammar lets EOS stand for the call closer: a body of complete parameters at the end of the stream is the call (a header alone, or an open parameter, still is not)"),
+            [{"kind": "tool_call", "name": "get_weather", "arguments": {"city": "Paris"}}],
         ),
         "reason_markup_in_arg": (
             r_tool("beam", "log", "note", r_reason("beam", "reconsider"), 0),

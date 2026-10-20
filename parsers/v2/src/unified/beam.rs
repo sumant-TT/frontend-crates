@@ -49,7 +49,7 @@
 //! `JsonKeys`), because it recovers how the bytes were framed, not what they mean.
 
 use crate::tool_calling::beam_body::{
-    JsonKeys, held_json_keys, param_value_end, recipient_len, recipient_properties,
+    JsonKeys, PARAM_FOLLOW, held_json_keys, param_value_span, recipient_len, recipient_properties,
     typed_arguments, typed_value, unframe, value_framing, verbatim_string,
 };
 use crate::tool_calling::beam_py::{PyValue, dump_str, dump_str_fragment};
@@ -178,6 +178,8 @@ struct BeamBoundary {
     json_keys: JsonKeys,
     /// Offset up to which parameter regions are known complete.
     scanned: usize,
+    /// Complete parameters read in this body.
+    complete: usize,
 }
 
 fn malformed(discard: usize, reason: &'static str) -> BodyScan {
@@ -192,6 +194,7 @@ impl InvokeBoundary for BeamBoundary {
 
     fn reset(&mut self) {
         self.scanned = 0;
+        self.complete = 0;
     }
 
     fn channel_body(&mut self, body: &str, flush: bool) -> BodyScan {
@@ -202,10 +205,16 @@ impl InvokeBoundary for BeamBoundary {
             let at = self.scanned + (rest.len() - t.len());
             self.scanned = at;
             if t.is_empty() {
-                return if flush {
-                    malformed(body.len(), "missing call terminator")
-                } else {
-                    BodyScan::Wait
+                // The serving grammar lets EOS end a call right after its last
+                // parameter, without the closer: a body of complete parameters is a
+                // call at the end of the stream. A header alone still is not.
+                return match (flush, self.complete) {
+                    (false, _) => BodyScan::Wait,
+                    (true, 0) => malformed(body.len(), "missing call terminator"),
+                    (true, _) => BodyScan::Complete {
+                        body_end: at,
+                        consume: at,
+                    },
                 };
             }
             if let Some(term) = [CALL, END].iter().find(|m| t.starts_with(**m)) {
@@ -238,9 +247,10 @@ impl InvokeBoundary for BeamBoundary {
                 };
                 let value_from = at + PARAM_OPEN.len() + key_end + 2;
                 let framing = value_framing(self.framing, &self.json_keys, &after[..key_end]);
-                match param_value_end(&body[value_from..], framing) {
-                    Some(end) => {
-                        self.scanned = value_from + end + PARAM_CLOSE.len();
+                match param_value_span(&body[value_from..], framing) {
+                    Some((_, next)) => {
+                        self.scanned = value_from + next;
+                        self.complete += 1;
                         continue;
                     }
                     None if !flush => return BodyScan::Wait,
@@ -513,6 +523,7 @@ impl InvokeEmitter for BeamEmitter {
             malformed: self.malformed,
             json_keys: self.json_keys(recipient),
             scanned: 0,
+            complete: 0,
         }))
     }
 
@@ -623,26 +634,31 @@ impl InvokeEmitter for BeamEmitter {
             if let Some(value) = open.value.as_mut() {
                 let after_key = &body[value.start..];
                 if value.incremental {
-                    let close = after_key.find(PARAM_CLOSE);
-                    let safe_end = match close {
-                        Some(close) => value.start + close,
-                        None => body.len() - marker_prefix_suffix_len(after_key, [PARAM_CLOSE]),
+                    // Raw text: the value ends at its closer or where the next parameter
+                    // opens (the serving grammar's implicit boundary), whichever is first.
+                    let span = param_value_span(after_key, ArgumentFraming::Lenient);
+                    let safe_end = match span {
+                        Some((end, _)) => value.start + end,
+                        None => {
+                            body.len()
+                                - marker_prefix_suffix_len(after_key, [PARAM_CLOSE, PARAM_FOLLOW])
+                        }
                     };
                     if safe_end > value.streamed {
                         value.append(&body[value.streamed..safe_end], &mut arguments);
                         value.streamed = safe_end;
                     }
-                    let Some(close) = close else {
+                    let Some((_, next)) = span else {
                         break;
                     };
                     arguments.push('"');
                     value.json_text.push('"');
-                    open.cursor = value.start + close + PARAM_CLOSE.len();
+                    open.cursor = value.start + next;
                     let value = open.value.take().expect("open value");
                     open.members.push((value.key, value.json_text));
                     continue;
                 }
-                let Some(end) = param_value_end(after_key, value.framing) else {
+                let Some((end, next)) = param_value_span(after_key, value.framing) else {
                     break;
                 };
                 let schema = open.properties.as_ref().and_then(|p| p.get(&value.key));
@@ -652,7 +668,7 @@ impl InvokeEmitter for BeamEmitter {
                 dump_str(&value.key, &mut arguments);
                 arguments.push_str(": ");
                 arguments.push_str(&text);
-                open.cursor = value.start + end + PARAM_CLOSE.len();
+                open.cursor = value.start + next;
                 let value = open.value.take().expect("open value");
                 open.members.push((value.key, text));
                 continue;
@@ -906,6 +922,100 @@ mod tests {
         let by_char = deltas_with(tools, &refs);
         assert_eq!(argument_text(&by_char), whole_text, "by char: {input}");
         assert_eq!(assemble(&by_char), want, "by char: {input}");
+    }
+
+    /// Tools the serving grammar admits: two string parameters, and names outside
+    /// `[a-zA-Z_][a-zA-Z0-9_.-]*`.
+    fn grammar_tools() -> Vec<Tool> {
+        let t = |name: &str, props: serde_json::Value| Tool {
+            name: name.into(),
+            description: None,
+            parameters: json!({"type": "object", "properties": props}),
+            strict: None,
+        };
+        vec![
+            t(
+                "t",
+                json!({"a": {"type": "string"}, "b": {"type": "string"}}),
+            ),
+            t(
+                "n",
+                json!({"a": {"type": "string"}, "b": {"type": "integer"}}),
+            ),
+            t("2fa_check", json!({})),
+            t("-tool", json!({})),
+        ]
+    }
+
+    fn header(name: &str) -> String {
+        format!("<|start|>assistant to={name}<|channel|>analysis <|constrain|>xml<|message|>")
+    }
+
+    #[test]
+    fn a_parameter_may_end_where_the_next_one_opens() {
+        // The serving grammar lets every parameter but the last end by opening the next
+        // one without its closer; the parser reads the same boundary, raw and typed.
+        let input = format!(
+            "{}<rfl:parameter name=\"a\">\nA\n<rfl:parameter name=\"b\">\nB\n</rfl:parameter><|call|>",
+            header("t")
+        );
+        expect_streamed(
+            &grammar_tools(),
+            &input,
+            vec![call("t", json!({"a": "A", "b": "B"}))],
+        );
+        let input = format!(
+            "{}<rfl:parameter name=\"a\">\nfirst\nline two\n<rfl:parameter name=\"b\">\n7\n</rfl:parameter><|call|>",
+            header("n")
+        );
+        expect_streamed(
+            &grammar_tools(),
+            &input,
+            vec![call("n", json!({"a": "first\nline two", "b": 7}))],
+        );
+    }
+
+    #[test]
+    fn grammar_admitted_tool_names_are_recipients() {
+        for name in ["2fa_check", "-tool"] {
+            let input = format!("{}<|call|>", header(name));
+            expect_streamed(&grammar_tools(), &input, vec![call(name, json!({}))]);
+        }
+    }
+
+    #[test]
+    fn a_delimited_call_completes_at_the_end_of_the_stream() {
+        // The serving grammar lets EOS end a call right after its last closer.
+        let input = format!(
+            "{}<rfl:parameter name=\"a\">\nA\n</rfl:parameter><rfl:parameter name=\"b\">\nB\n</rfl:parameter>",
+            header("t")
+        );
+        expect_streamed(
+            &grammar_tools(),
+            &input,
+            vec![call("t", json!({"a": "A", "b": "B"}))],
+        );
+        // A header alone, or a parameter still open, is not a call.
+        for input in [
+            header("t"),
+            format!("{}<rfl:parameter name=\"a\">\nA", header("t")),
+            format!(
+                "{}<rfl:parameter name=\"a\">\nA\n</rfl:parameter><rfl:parameter name=\"b",
+                header("t")
+            ),
+        ] {
+            let events = deltas_with(&grammar_tools(), &[&input]);
+            assert!(
+                call_deltas(&events).iter().all(|delta| !delta.complete),
+                "{input:?}: {events:?}"
+            );
+            assert!(
+                assemble(&events)
+                    .iter()
+                    .all(|event| !matches!(event, UnifiedEvent::ToolCall { .. })),
+                "{input:?}: {events:?}"
+            );
+        }
     }
 
     #[test]
@@ -1243,8 +1353,15 @@ mod tests {
 
     #[test]
     fn strict_rejects_unterminated_header_only_and_malformed() {
+        // A delimited call that the stream ends after is a call (the serving grammar
+        // lets EOS stand for the closer), under the strict policy too.
+        for got in splits(&format!("{HDR}{LONDON}"), strict()) {
+            assert_eq!(
+                got.unwrap(),
+                vec![call("weather", json!({"location": "London"}))]
+            );
+        }
         for tail in [
-            format!("{HDR}{LONDON}"),
             HDR.to_string(),
             format!("{HDR}<rfl:parameter name=\"location\">\nLondon\n"),
             format!("{HDR}<rfl:parameter name=\"location\">\nLondon\n</wrong><|call|>"),

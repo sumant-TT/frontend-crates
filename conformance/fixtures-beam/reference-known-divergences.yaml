@@ -31,6 +31,10 @@
 #        call there and a call body can run across a removed `<|end|>` into the next
 #        header. V2 is a single state machine: a `final` body is text until its closer,
 #        and every call ends at its own terminator.
+#   N  — a recipient the serving grammar admits (`[^\s<]+`, here the declared tool
+#        `2fa_check`) but the reference's `[a-zA-Z_][a-zA-Z0-9_.-]*` recipient rule does
+#        not: the reference reads no call, V2 serves the call the grammar held the model
+#        to (the builder and parser share one name contract, `[A-Za-z0-9_.-]+`).
 known_divergences:
   - id: gen-11
     reason: "F: `<|start|>` inside an unterminated `final` body ends it in V2; the reference keeps the call markup as content. The recovered call also carries C (`<|call|>` inside a value) and is dropped by V2."
@@ -112,3 +116,29 @@ known_divergences:
     reason: "P: reply prefill; the reference ends the reply at the first `<|end|>` (inside a quoted value of narrated tool markup) and drops the rest, V1/V2 keep the rest of the stream as reply text with the markers stripped."
   - id: gen-347
     reason: "P: reply prefill; the reference ends the reply at its first terminator and drops the rest, V1/V2 keep the rest of the stream as reply text with the markers stripped."
+  - id: gen-6
+    reason: "N: the declared tool `2fa_check` (leading digit) is called; the reference drops the call, V2 serves it as the grammar admits it."
+  - id: gen-43
+    reason: "N: the declared tool `2fa_check` (leading digit) is called; the reference drops the call, V2 serves it as the grammar admits it."
+  - id: gen-120
+    reason: "N: the declared tool `2fa_check` (leading digit) is called; the reference drops the call, V2 serves it as the grammar admits it."
+  - id: gen-172
+    reason: "N: the declared tool `2fa_check` (leading digit) is called; the reference drops the call, V2 serves it as the grammar admits it."
+  - id: gen-247
+    reason: "N: the declared tool `2fa_check` (leading digit) is called; the reference drops the call, V2 serves it as the grammar admits it."
+  - id: gen-303
+    reason: "N: the declared tool `2fa_check` (leading digit) is called; the reference drops the call, V2 serves it as the grammar admits it."
+  - id: gen-323
+    reason: "N: the declared tool `2fa_check` (leading digit) is called; the reference drops the call, V2 serves it as the grammar admits it."
+  - id: gen-326
+    reason: "N: the declared tool `2fa_check` (leading digit) is called; the reference drops the call, V2 serves it as the grammar admits it."
+  - id: gen-467
+    reason: "N: the declared tool `2fa_check` (leading digit) is called; the reference drops the call, V2 serves it as the grammar admits it."
+  - id: gen-514
+    reason: "N: the declared tool `2fa_check` (leading digit) is called; the reference drops the call, V2 serves it as the grammar admits it."
+  - id: gen-529
+    reason: "N: the declared tool `2fa_check` (leading digit) is called; the reference drops the call, V2 serves it as the grammar admits it."
+  - id: gen-542
+    reason: "N: the declared tool `2fa_check` (leading digit) is called; the reference drops the call, V2 serves it as the grammar admits it."
+  - id: gen-586
+    reason: "N: the declared tool `2fa_check` (leading digit) is called; the reference drops the call, V2 serves it as the grammar admits it."

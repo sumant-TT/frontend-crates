@@ -325,8 +325,11 @@ fn answer_text() -> Vec<Value> {
     ]
 }
 
+/// Whether a declared tool's name can be held and read back: the parser's recipient
+/// contract (`[A-Za-z0-9_.-]+`, see `beam_body::is_valid_recipient`). A name outside it
+/// derives no grammar rather than a branch whose calls the parser would drop.
 fn name_encodable(name: &str) -> bool {
-    !name.is_empty() && !name.chars().any(|c| c.is_whitespace() || c == '<')
+    crate::tool_calling::beam_body::is_valid_recipient(name)
 }
 
 /// A regex for the names `[^\s<]+` matches besides `names`.
@@ -1514,6 +1517,18 @@ mod tests {
             false,
         );
         assert!(turn(&[spaced], Auto, true).is_none());
+        // Outside the parser's recipient contract: no branch the parser would drop.
+        let colon = tool(
+            "a:b",
+            Some(object(json!({"q": {"type": "string"}}), Some(vec!["q"]))),
+            false,
+        );
+        assert!(turn(&[colon], Auto, true).is_none());
+        // Inside it: digit- and hyphen-leading names are held like any other.
+        for name in ["2fa_check", "-tool"] {
+            let held = tool(name, Some(object(json!({}), None)), false);
+            assert!(turn(&[held], Auto, true).is_some(), "{name}");
+        }
         let strict_short = tool(
             "strict_short",
             Some(object(

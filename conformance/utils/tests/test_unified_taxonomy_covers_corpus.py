@@ -1620,23 +1620,23 @@ def _assert_cross_family_contract(corpus):
                 assert case["tools"][0]["parameters"]["properties"]["city"]["type"] == expected_type
                 assert events == [{"kind": "tool_call", "name": "get_weather", "arguments": {"city": value}}]
             if scenario == "tool_no_close":
-                # DSML's public EOF contract drops an invoke without its closer, and a
-                # Beam call dispatches only once `<|call|>`/`<|end|>` arrives. Assert
-                # those exceptions independently; do not normalize [] to a call.
-                if family in {"deepseek_v4", "deepseek_v41", "beam"}:
+                # DSML's public EOF contract drops an invoke without its closer. Assert
+                # that exception independently; do not normalize [] to a call.
+                if family in {"deepseek_v4", "deepseek_v41"}:
                     assert events == [], (family, scenario, "grammar requires the call terminator")
                     assert _native_input_calls(family, case["input"]) == [
                         {"kind": "tool_call", "name": "get_weather", "arguments": {"city": "Paris"}},
                     ], (family, scenario, "EOF body differs")
-                    if family == "beam":
-                        assert "</rfl:parameter>" in case["input"]
-                        assert "<|call|>" not in case["input"]
-                    else:
-                        gap = " " if family == "deepseek_v41" else ""
-                        assert f'</｜DSML｜{gap}parameter>' in case["input"]
-                        assert f'</｜DSML｜{gap}invoke>' not in case["input"]
+                    gap = " " if family == "deepseek_v41" else ""
+                    assert f'</｜DSML｜{gap}parameter>' in case["input"]
+                    assert f'</｜DSML｜{gap}invoke>' not in case["input"]
                 else:
                     assert events == [{"kind": "tool_call", "name": "get_weather", "arguments": {"city": "Paris"}}]
+                    if family == "beam":
+                        # Beam's serving grammar lets EOS stand for `<|call|>`: the
+                        # delimited body is the call, with no terminator in the input.
+                        assert "</rfl:parameter>" in case["input"]
+                        assert "<|call|>" not in case["input"]
                 events = None
             suppressed = []
             if init["tool_output_mode"] == "GuidedJson":
