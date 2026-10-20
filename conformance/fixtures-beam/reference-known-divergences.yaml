@@ -142,3 +142,5 @@ known_divergences:
     reason: "N: the declared tool `2fa_check` (leading digit) is called; the reference drops the call, V2 serves it as the grammar admits it."
   - id: gen-586
     reason: "N: the declared tool `2fa_check` (leading digit) is called; the reference drops the call, V2 serves it as the grammar admits it."
+  - id: gen-288
+    reason: "N: the declared tool `2fa_check` (leading digit) is called with no parameters and the stream ends after the header; the reference drops the call, V2 serves `{}` as the grammar admits it (nothing required, closer optional)."

@@ -871,6 +871,20 @@ pub(crate) fn typed_arguments(
     Ok(args)
 }
 
+/// Whether tool `name` declares a schema that admits an empty argument body: an object
+/// with no `required` properties (an empty `properties` map included). `None` for an
+/// unknown tool. The serving grammar makes the whole parameter body optional for such a
+/// tool, so a header the stream ends after is a complete call `{}`.
+pub(crate) fn recipient_admits_empty_arguments(tools: &[Tool], name: &str) -> Option<bool> {
+    let tool = tools.iter().rev().find(|tool| tool.name == name)?;
+    let schema = typed_parameters(&tool.parameters);
+    let required = match schema.get("required") {
+        Some(Value::Array(required)) => !required.is_empty(),
+        _ => false,
+    };
+    Some(!required)
+}
+
 /// The typed `properties` of tool `name`. The reference builds its name -> schema map
 /// in order, so the LAST definition wins; `None` for an unknown tool or a schema
 /// without an object `properties` map (every parameter then keeps its text).

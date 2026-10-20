@@ -2,11 +2,59 @@ provenance:
   status: captured
   origin:
     crate_version: 0.10.1
-    git_commit: fcd22e37a55cb28714e4c3fd57323a87705c1830
-    source_sha256: e3e16142573b2fe6254e71c73a13f2fe1d4a81481617a71f8ceed737a15d6cc5
+    git_commit: f6a52f0b35926c3f29c32b9530610344fdb1a4cc
+    source_sha256: 83ee4efc7c8d771faeee395e92ef21eceefd31c44fbf2bcbe97ae9fd81cb6d9d
 document:
   mode: unified
 changes:
+  empty_args_no_close:
+    case_key: UNIFIED.6-empty_args_no_close
+    stimulus:
+      ref: current
+      semantic_sha256: 2c5f7bdbf1a5341855097109e4b64a8752b023b632b9c01c87c59b509e1db755
+    observation:
+      value:
+        assembled:
+        - kind: tool_call
+          name: noop
+          arguments: {}
+        chunks:
+        - expected: []
+        - expected: []
+        - expected: []
+        - expected: []
+        - expected: []
+        - expected: []
+        - expected: []
+        - expected:
+          - kind: tool_call
+            name: noop
+            arguments: '{}'
+            complete: true
+  optional_args_no_close:
+    case_key: UNIFIED.6-optional_args_no_close
+    stimulus:
+      ref: current
+      semantic_sha256: 82a190f91b116b0afbeb4aa12b50190b285125547b81de8ae8fc228a61dec854
+    observation:
+      value:
+        assembled:
+        - kind: tool_call
+          name: noop
+          arguments: {}
+        chunks:
+        - expected: []
+        - expected: []
+        - expected: []
+        - expected: []
+        - expected: []
+        - expected: []
+        - expected: []
+        - expected:
+          - kind: tool_call
+            name: noop
+            arguments: '{}'
+            complete: true
   tool_no_close:
     case_key: UNIFIED.5-tool_no_close
     observation:
@@ -46,12 +94,30 @@ changes:
             complete: true
 metadata_changes: {}
 document_overrides:
+  empty_args_no_close:
+    capture_provenance:
+      captured_with:
+        dynamo_v2: 0.10.1
+      capture_origin:
+        crate_version: 0.10.1
+        source_sha256: 83ee4efc7c8d771faeee395e92ef21eceefd31c44fbf2bcbe97ae9fd81cb6d9d
+        git_commit: f6a52f0b35926c3f29c32b9530610344fdb1a4cc
+      inherited_from: null
+  optional_args_no_close:
+    capture_provenance:
+      captured_with:
+        dynamo_v2: 0.10.1
+      capture_origin:
+        crate_version: 0.10.1
+        source_sha256: 83ee4efc7c8d771faeee395e92ef21eceefd31c44fbf2bcbe97ae9fd81cb6d9d
+        git_commit: f6a52f0b35926c3f29c32b9530610344fdb1a4cc
+      inherited_from: null
   tool_no_close:
     capture_provenance:
       captured_with:
         dynamo_v2: 0.10.1
       capture_origin:
         crate_version: 0.10.1
-        source_sha256: e3e16142573b2fe6254e71c73a13f2fe1d4a81481617a71f8ceed737a15d6cc5
-        git_commit: fcd22e37a55cb28714e4c3fd57323a87705c1830
+        source_sha256: 83ee4efc7c8d771faeee395e92ef21eceefd31c44fbf2bcbe97ae9fd81cb6d9d
+        git_commit: f6a52f0b35926c3f29c32b9530610344fdb1a4cc
       inherited_from: null

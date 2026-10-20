@@ -45,7 +45,7 @@ UNIFIED_TAX = {
     "orphan_close_after_prose": (5, "3"),
     "malformed_json_then_two_valid_calls": (5, "4"),
     # Group 6 — Empty body (streamv1.6)
-    "empty_args": (6, "1"),
+    "empty_args": (6, "1"), "empty_args_no_close": (6, "2"), "optional_args_no_close": (6, "3"),
     # Group 7 — Argument fidelity (streamv1.7)
     "arg_unicode": (7, "1"), "arg_marker_in_string": (7, "2"),
     "deepseek_v41_mixed_control_text_in_string": (7, "3"),

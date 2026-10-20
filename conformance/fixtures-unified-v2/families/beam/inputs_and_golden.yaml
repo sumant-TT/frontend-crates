@@ -15581,3 +15581,77 @@ cases:
         arguments:
           value:
             x: 1
+  empty_args_no_close:
+    lifecycle: active
+    scenario: empty_args_no_close
+    description: 'Beam: a header for a strict tool with no properties, then EOS — no parameter tags, no newline, no `<|call|>`. The grammar admits it (optional body, optional closer), so the parser emits `noop({})`.'
+    policy:
+    - P3
+    display_id: UNIFIED.6-empty_args_no_close
+    historical_ids: []
+    request:
+      input: <|start|>assistant to=noop<|channel|>analysis <|constrain|>xml<|message|>
+      init:
+        starting_state: None
+        tool_output_mode: Native
+        named_tool: null
+      finish_reason: stop
+      tools:
+      - name: noop
+        parameters:
+          type: object
+          properties: {}
+          additionalProperties: false
+        strict: true
+      chunks:
+      - delta_text: <|start|>
+      - delta_text: assistant to=noop
+      - delta_text: <|channel|>
+      - delta_text: 'analysis '
+      - delta_text: <|constrain|>
+      - delta_text: xml
+      - delta_text: <|message|>
+      - delta_text: ‹finish›
+    golden:
+      assembled:
+      - kind: tool_call
+        name: noop
+        arguments: {}
+  optional_args_no_close:
+    lifecycle: active
+    scenario: optional_args_no_close
+    description: 'Beam: a header for a tool whose only property is optional, then EOS — no parameter tags, no `<|call|>`. Nothing is required, so the grammar admits the bare header and the parser emits `noop({})`; a required argument would keep this a truncation.'
+    policy:
+    - P3
+    display_id: UNIFIED.6-optional_args_no_close
+    historical_ids: []
+    request:
+      input: <|start|>assistant to=noop<|channel|>analysis <|constrain|>xml<|message|>
+      init:
+        starting_state: None
+        tool_output_mode: Native
+        named_tool: null
+      finish_reason: stop
+      tools:
+      - name: noop
+        parameters:
+          type: object
+          properties:
+            a:
+              type: string
+          additionalProperties: false
+        strict: true
+      chunks:
+      - delta_text: <|start|>
+      - delta_text: assistant to=noop
+      - delta_text: <|channel|>
+      - delta_text: 'analysis '
+      - delta_text: <|constrain|>
+      - delta_text: xml
+      - delta_text: <|message|>
+      - delta_text: ‹finish›
+    golden:
+      assembled:
+      - kind: tool_call
+        name: noop
+        arguments: {}

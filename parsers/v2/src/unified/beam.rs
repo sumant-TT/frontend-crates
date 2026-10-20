@@ -49,8 +49,9 @@
 //! `JsonKeys`), because it recovers how the bytes were framed, not what they mean.
 
 use crate::tool_calling::beam_body::{
-    JsonKeys, PARAM_FOLLOW, held_json_keys, param_value_span, recipient_len, recipient_properties,
-    typed_arguments, typed_value, unframe, value_framing, verbatim_string,
+    JsonKeys, PARAM_FOLLOW, held_json_keys, param_value_span, recipient_admits_empty_arguments,
+    recipient_len, recipient_properties, typed_arguments, typed_value, unframe, value_framing,
+    verbatim_string,
 };
 use crate::tool_calling::beam_py::{PyValue, dump_str, dump_str_fragment};
 use crate::tool_calling::scan::{
@@ -180,6 +181,9 @@ struct BeamBoundary {
     scanned: usize,
     /// Complete parameters read in this body.
     complete: usize,
+    /// The recipient's schema admits an empty argument body (declared, nothing
+    /// required), so the grammar lets the stream end right after the header.
+    empty_body_ok: bool,
 }
 
 fn malformed(discard: usize, reason: &'static str) -> BodyScan {
@@ -210,7 +214,9 @@ impl InvokeBoundary for BeamBoundary {
                 // call at the end of the stream. A header alone still is not.
                 return match (flush, self.complete) {
                     (false, _) => BodyScan::Wait,
-                    (true, 0) => malformed(body.len(), "missing call terminator"),
+                    (true, 0) if !self.empty_body_ok => {
+                        malformed(body.len(), "missing call terminator")
+                    }
                     (true, _) => BodyScan::Complete {
                         body_end: at,
                         consume: at,
@@ -524,6 +530,7 @@ impl InvokeEmitter for BeamEmitter {
             json_keys: self.json_keys(recipient),
             scanned: 0,
             complete: 0,
+            empty_body_ok: recipient_admits_empty_arguments(&self.tools, recipient) == Some(true),
         }))
     }
 
@@ -927,23 +934,25 @@ mod tests {
     /// Tools the serving grammar admits: two string parameters, and names outside
     /// `[a-zA-Z_][a-zA-Z0-9_.-]*`.
     fn grammar_tools() -> Vec<Tool> {
-        let t = |name: &str, props: serde_json::Value| Tool {
+        let t = |name: &str, props: serde_json::Value, required: &[&str]| Tool {
             name: name.into(),
             description: None,
-            parameters: json!({"type": "object", "properties": props}),
+            parameters: json!({"type": "object", "properties": props, "required": required}),
             strict: None,
         };
         vec![
             t(
                 "t",
                 json!({"a": {"type": "string"}, "b": {"type": "string"}}),
+                &["a", "b"],
             ),
             t(
                 "n",
                 json!({"a": {"type": "string"}, "b": {"type": "integer"}}),
+                &["a", "b"],
             ),
-            t("2fa_check", json!({})),
-            t("-tool", json!({})),
+            t("2fa_check", json!({}), &[]),
+            t("-tool", json!({}), &[]),
         ]
     }
 
@@ -980,6 +989,81 @@ mod tests {
         for name in ["2fa_check", "-tool"] {
             let input = format!("{}<|call|>", header(name));
             expect_streamed(&grammar_tools(), &input, vec![call(name, json!({}))]);
+        }
+    }
+
+    /// `noop` admits an empty body (strict, no properties); `maybe` has one optional
+    /// property; `must` requires one.
+    fn empty_body_tools() -> Vec<Tool> {
+        let t = |name: &str, parameters: serde_json::Value| Tool {
+            name: name.into(),
+            description: None,
+            parameters,
+            strict: Some(true),
+        };
+        vec![
+            t(
+                "noop",
+                json!({"type": "object", "properties": {}, "additionalProperties": false}),
+            ),
+            t(
+                "maybe",
+                json!({"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": false}),
+            ),
+            t(
+                "must",
+                json!({"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"], "additionalProperties": false}),
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_header_alone_is_a_call_when_the_schema_admits_an_empty_body() {
+        // The serving grammar makes the whole parameter body optional for such a tool
+        // and lets EOS stand for the closer: the header is the call, under both
+        // malformed-call policies and the schema-constrained framing.
+        for malformed in [
+            MalformedToolCallPolicy::Drop,
+            MalformedToolCallPolicy::Reject,
+        ] {
+            let policy = ToolCallPolicy {
+                malformed,
+                argument_framing: ArgumentFraming::SchemaConstrained,
+            };
+            for name in ["noop", "maybe"] {
+                for input in [header(name), format!("{}<|call|>", header(name))] {
+                    for got in splits_with(&empty_body_tools(), &input, policy) {
+                        assert_eq!(
+                            got.unwrap(),
+                            vec![call(name, json!({}))],
+                            "{malformed:?} {input:?}"
+                        );
+                    }
+                }
+            }
+            // A required argument keeps the header-only stream a truncation, and an open
+            // parameter body stays one: no empty call is invented.
+            for input in [
+                header("must"),
+                format!("{}<rfl:parameter name=\"a\">\nA", header("must")),
+                format!("{}<rfl:parameter name=\"a\">\nA", header("maybe")),
+            ] {
+                for got in splits_with(&empty_body_tools(), &input, policy) {
+                    match got {
+                        Ok(events) => assert!(
+                            events
+                                .iter()
+                                .all(|e| !matches!(e, UnifiedEvent::ToolCall { .. })),
+                            "{malformed:?} {input:?}: {events:?}"
+                        ),
+                        Err(error) => assert_eq!(
+                            malformed,
+                            MalformedToolCallPolicy::Reject,
+                            "{input:?}: {error}"
+                        ),
+                    }
+                }
+            }
         }
     }
 
@@ -1361,8 +1445,11 @@ mod tests {
                 vec![call("weather", json!({"location": "London"}))]
             );
         }
+        // `weather` requires nothing, so its header alone is the call `{}` as well.
+        for got in splits(HDR, strict()) {
+            assert_eq!(got.unwrap(), vec![call("weather", json!({}))]);
+        }
         for tail in [
-            HDR.to_string(),
             format!("{HDR}<rfl:parameter name=\"location\">\nLondon\n"),
             format!("{HDR}<rfl:parameter name=\"location\">\nLondon\n</wrong><|call|>"),
             format!("{HDR}{LONDON}<|start|>assistant<|channel|>final<|message|>x<|return|>"),
@@ -1473,11 +1560,17 @@ mod tests {
 
     #[test]
     fn strict_rejects_header_truncated_inside_channel_marker_and_reset_keeps_start() {
+        // A complete header for `fn` (nothing required) is the call `{}` at EOS.
+        let complete = "<|start|>assistant to=fn<|channel|>analysis <|constrain|>xml<|message|>";
+        for policy in [strict(), ToolCallPolicy::default()] {
+            for got in splits(complete, policy) {
+                assert_eq!(got.unwrap(), vec![call("fn", json!({}))]);
+            }
+        }
         for input in [
             "<|start|>assistant to=fn<|chan",
             "<|start|>assistant to=fn<|channel|>",
             "<|start|>assistant to=fn<|channel|>analysis <|constr",
-            "<|start|>assistant to=fn<|channel|>analysis <|constrain|>xml<|message|>",
         ] {
             for got in splits(input, strict()) {
                 let error = got.expect_err(input);

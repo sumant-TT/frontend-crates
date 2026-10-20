@@ -915,6 +915,28 @@ EDGE = [
                          V_MUSE, M),
      }),
 
+    # Beam: the serving grammar makes the whole parameter body optional for a tool whose
+    # schema requires nothing, and lets EOS stand for the call closer, so a tool header the
+    # stream ends after is the complete call `{}`. Scope is Beam-specific: the grammar
+    # itself admits this byte sequence (review of #438); other grammars are not asserted.
+    ("empty_args_no_close",
+     "Beam: a header for a strict tool with no properties, then EOS — no parameter tags, no newline, no `<|call|>`. The grammar admits it (optional body, optional closer), so the parser emits `noop({})`.",
+     ["P3"],
+     [{"kind": "tool_call", "name": "noop", "arguments": {}}],
+     {"starting_state": "None", "tool_output_mode": "Native", "named_tool": None},
+     {"finish_reason": "stop"},
+     OnlyFamilies({"beam": ("<|start|>assistant to=noop<|channel|>analysis <|constrain|>xml<|message|>", VLLM_UNCAPTURABLE["beam"], M)}),
+     [{"name": "noop", "parameters": {"type": "object", "properties": {}, "additionalProperties": False}, "strict": True}]),
+
+    ("optional_args_no_close",
+     "Beam: a header for a tool whose only property is optional, then EOS — no parameter tags, no `<|call|>`. Nothing is required, so the grammar admits the bare header and the parser emits `noop({})`; a required argument would keep this a truncation.",
+     ["P3"],
+     [{"kind": "tool_call", "name": "noop", "arguments": {}}],
+     {"starting_state": "None", "tool_output_mode": "Native", "named_tool": None},
+     {"finish_reason": "stop"},
+     OnlyFamilies({"beam": ("<|start|>assistant to=noop<|channel|>analysis <|constrain|>xml<|message|>", VLLM_UNCAPTURABLE["beam"], M)}),
+     [{"name": "noop", "parameters": {"type": "object", "properties": {"a": {"type": "string"}}, "additionalProperties": False}, "strict": True}]),
+
     ("tool_no_close",
      "A single tool call whose body is complete but the close marker never arrives before EOF. Most grammars recover the complete call at finish; DSML requires the invoke close, so its malformed turn emits nothing. This is also covered in: TOOLCALLING.streamv1.5.a.",
      [],
