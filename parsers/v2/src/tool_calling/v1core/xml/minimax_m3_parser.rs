@@ -220,7 +220,7 @@ fn parse_invokes(
 }
 
 // Reads the `name` attribute from `<invoke ...>` using vLLM-compatible quoting variants.
-fn parse_invoke_name(tag_attrs: &str) -> Option<String> {
+pub(crate) fn parse_invoke_name(tag_attrs: &str) -> Option<String> {
     let attrs = tag_attrs.trim_start();
     let after_name = attrs.strip_prefix("name")?.trim_start();
     let value = after_name.strip_prefix('=')?.trim_start();
@@ -894,7 +894,7 @@ impl<'a> SchemaWalker<'a> {
 }
 
 // Decodes common XML/HTML entities so tool arguments receive the intended literal text.
-fn html_unescape(s: &str) -> String {
+pub(crate) fn html_unescape(s: &str) -> String {
     s.replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&amp;", "&")

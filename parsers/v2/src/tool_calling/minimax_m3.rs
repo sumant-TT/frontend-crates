@@ -22,19 +22,29 @@
 //! matches exactly what the batch parser produces. Arguments are re-serialized
 //! in source parameter-tag order because the v1 parser builds them from a
 //! `HashMap` whose key order is non-deterministic.
+//!
+//! While an invoke is open, schema-declared plain-string parameters stream as
+//! JSON string fragments; the first parameter of any other shape stops
+//! streaming, and the rest of the call arrives at the invoke close.
 
 use crate::tool_calling::scan::{
     BareRecoveryLatch, InvokeEmitter, InvokeLatch, WrappedBlockScanner, WrappedBlockSpec,
-    reorder_arguments,
+    marker_prefix_suffix_len, reorder_arguments,
 };
+use crate::tool_calling::v1core::xml::{minimax_m3_html_unescape, minimax_m3_invoke_name};
 use crate::tool_calling::v1core::{
     MiniMaxM3ParserConfig, ToolDefinition, try_tool_call_parse_minimax_m3,
 };
 
 use crate::tool_calling::traits::{Tool, ToolCallDelta, ToolParseResult, ToolParser};
+use std::collections::HashSet;
 
 /// The namespace token emitted before every M3 tag.
 const NS: &str = "]<]minimax[>[";
+/// Opens a parameter tag, or a nested element inside a value.
+const TAG_OPEN: &str = "]<]minimax[>[<";
+/// Longest input the batch entity decoder rewrites as one unit (`&amp;quot;`).
+const MAX_ENTITY_SPAN: usize = 10;
 const BLOCK_START: &str = "]<]minimax[>[<tool_call>";
 const BLOCK_END: &str = "]<]minimax[>[</tool_call>";
 /// Bare `<invoke` (no trailing `>`): matches both `<invoke name="...">` and the
@@ -73,14 +83,204 @@ fn spec() -> WrappedBlockSpec {
 struct M3Emitter {
     config: MiniMaxM3ParserConfig,
     tools: Vec<ToolDefinition>,
+    partial: Option<PartialInvoke>,
+}
+
+/// Arguments already streamed for the open invoke.
+struct PartialInvoke {
+    tool_index: usize,
+    /// `<invoke ...>` header and the tail of the input seen so far, so state
+    /// from an invoke the scanner dropped is never applied to a new one.
+    header: String,
+    seen_len: usize,
+    seen_tail: String,
+    name: String,
+    emitted_json: String,
+    scan_cursor: usize,
+    seen_parameters: HashSet<String>,
+    active: Option<ActiveString>,
+    blocked: bool,
+}
+
+struct ActiveString {
+    closer: String,
+    /// Raw value bytes before this offset have been emitted.
+    value_cursor: usize,
+    search_cursor: usize,
+    /// `{"key":"` or `,"key":"`, sent with the first non-whitespace value byte
+    /// so a value that turns out to be nested XML has emitted nothing.
+    opener: String,
+    started: bool,
+}
+
+enum ValueScan {
+    Open(usize),
+    Closed(usize),
+    Nested,
+}
+
+impl PartialInvoke {
+    fn continues(&self, invoke: &str, tool_index: usize) -> bool {
+        self.tool_index == tool_index
+            && invoke.starts_with(&self.header)
+            && invoke
+                .get(..self.seen_len)
+                .is_some_and(|seen| seen.ends_with(&self.seen_tail))
+    }
+
+    fn mark_seen(&mut self, invoke: &str) {
+        let mut tail = invoke.len().saturating_sub(16);
+        while !invoke.is_char_boundary(tail) {
+            tail -= 1;
+        }
+        self.seen_len = invoke.len();
+        self.seen_tail = invoke[tail..].to_string();
+    }
+}
+
+fn is_plain_string(tools: &[ToolDefinition], tool: &str, parameter: &str) -> bool {
+    tools
+        .iter()
+        .find(|definition| definition.name == tool)
+        .and_then(|definition| definition.parameters.as_ref())
+        .and_then(|schema| schema.get("properties"))
+        .and_then(|properties| properties.get(parameter))
+        .is_some_and(|schema| {
+            schema.get("type").and_then(serde_json::Value::as_str) == Some("string")
+                && ["$ref", "allOf", "anyOf", "oneOf", "enum", "const"]
+                    .iter()
+                    .all(|key| schema.get(key).is_none())
+                && schema.get("nullable").and_then(serde_json::Value::as_bool) != Some(true)
+        })
 }
 
 impl InvokeEmitter for M3Emitter {
+    fn parse_partial_invoke(
+        &mut self,
+        invoke: &str,
+        tool_index: usize,
+    ) -> anyhow::Result<Option<ToolCallDelta>> {
+        if self
+            .partial
+            .as_ref()
+            .is_some_and(|partial| !partial.continues(invoke, tool_index))
+        {
+            self.partial = None;
+        }
+        if self.partial.is_none() {
+            let Some(header_end) = invoke
+                .strip_prefix(FUNCTION_START)
+                .and_then(|attributes| attributes.find('>'))
+                .map(|offset| FUNCTION_START.len() + offset)
+            else {
+                return Ok(None);
+            };
+            let name = minimax_m3_invoke_name(&invoke[FUNCTION_START.len()..header_end])
+                .unwrap_or_default();
+            let known = self.tools.iter().any(|tool| tool.name == name);
+            self.partial = Some(PartialInvoke {
+                tool_index,
+                header: invoke[..=header_end].to_string(),
+                seen_len: 0,
+                seen_tail: String::new(),
+                name,
+                emitted_json: String::new(),
+                scan_cursor: header_end + 1,
+                seen_parameters: HashSet::new(),
+                active: None,
+                blocked: !known,
+            });
+        }
+
+        let partial = self.partial.as_mut().expect("initialized above");
+        partial.mark_seen(invoke);
+        if partial.blocked {
+            return Ok(None);
+        }
+        let mut arguments = String::new();
+        loop {
+            if let Some(active) = partial.active.as_mut() {
+                match scan_string_value(invoke, active) {
+                    ValueScan::Open(end) => {
+                        let end = entity_safe_end(invoke, active.value_cursor, end);
+                        append_value(active, &invoke[..end], false, &mut arguments);
+                        break;
+                    }
+                    ValueScan::Closed(end) => {
+                        append_value(active, &invoke[..end], true, &mut arguments);
+                        arguments.push('"');
+                        partial.scan_cursor = end + active.closer.len();
+                        partial.active = None;
+                        continue;
+                    }
+                    ValueScan::Nested => {
+                        partial.blocked = true;
+                        break;
+                    }
+                }
+            }
+
+            let Some(relative) = invoke[partial.scan_cursor..].find(TAG_OPEN) else {
+                break;
+            };
+            let tag = partial.scan_cursor + relative + TAG_OPEN.len();
+            let Some(tag_len) = invoke[tag..].find('>') else {
+                break;
+            };
+            let parameter = &invoke[tag..tag + tag_len];
+            // The batch parser skips closers and malformed tag names.
+            if parameter.is_empty()
+                || parameter.starts_with('/')
+                || parameter.contains(char::is_whitespace)
+            {
+                partial.scan_cursor = tag + tag_len + 1;
+                continue;
+            }
+            if !partial.seen_parameters.insert(parameter.to_string())
+                || !is_plain_string(&self.tools, &partial.name, parameter)
+            {
+                partial.blocked = true;
+                break;
+            }
+            let mut opener =
+                String::from(if partial.emitted_json.is_empty() && arguments.is_empty() {
+                    "{"
+                } else {
+                    ","
+                });
+            opener.push_str(&serde_json::to_string(parameter)?);
+            opener.push_str(":\"");
+            let value_start = tag + tag_len + 1;
+            partial.active = Some(ActiveString {
+                closer: format!("{NS}</{parameter}>"),
+                value_cursor: value_start,
+                search_cursor: value_start,
+                opener,
+                started: false,
+            });
+        }
+        if arguments.is_empty() {
+            return Ok(None);
+        }
+        let first = partial.emitted_json.is_empty();
+        partial.emitted_json.push_str(&arguments);
+        Ok(Some(ToolCallDelta {
+            tool_index,
+            name: first.then(|| partial.name.clone()),
+            arguments,
+            complete: false,
+        }))
+    }
+
     fn parse_invoke(
         &mut self,
         invoke: &str,
         tool_index: usize,
     ) -> anyhow::Result<Option<ToolCallDelta>> {
+        let partial = self
+            .partial
+            .take()
+            .filter(|partial| partial.continues(invoke, tool_index));
         let wrapped = format!("{BLOCK_START}{invoke}{BLOCK_END}");
         let tools_opt = (!self.tools.is_empty()).then_some(self.tools.as_slice());
         let (calls, _content) = try_tool_call_parse_minimax_m3(&wrapped, &self.config, tools_opt)?;
@@ -89,13 +289,96 @@ impl InvokeEmitter for M3Emitter {
         };
         let arguments =
             reorder_arguments(&call.function.arguments, &source_parameter_order(invoke));
+        let emitted = partial
+            .map(|partial| partial.emitted_json)
+            .unwrap_or_default();
+        if emitted.is_empty() {
+            return Ok(Some(ToolCallDelta {
+                tool_index,
+                name: Some(call.function.name),
+                arguments,
+                complete: true,
+            }));
+        }
+        let Some(suffix) = arguments.strip_prefix(&emitted) else {
+            // Already-streamed text cannot be retracted, so leave the call
+            // incomplete for the coalescer to discard.
+            tracing::warn!(
+                why = "minimax_m3_streamed_call_invalidated",
+                tool_index,
+                "streamed MiniMax-M3 arguments no longer match the completed call"
+            );
+            return Ok(Some(ToolCallDelta {
+                tool_index,
+                name: None,
+                arguments: String::new(),
+                complete: false,
+            }));
+        };
         Ok(Some(ToolCallDelta {
             tool_index,
-            name: Some(call.function.name),
-            arguments,
+            name: None,
+            arguments: suffix.to_string(),
             complete: true,
         }))
     }
+
+    fn reset(&mut self) {
+        self.partial = None;
+    }
+}
+
+/// Finds where an open string value ends, or how far it is safe to read.
+fn scan_string_value(invoke: &str, active: &mut ActiveString) -> ValueScan {
+    loop {
+        let Some(relative) = invoke[active.search_cursor..].find(NS) else {
+            let held = marker_prefix_suffix_len(&invoke[active.search_cursor..], [NS]);
+            active.search_cursor = invoke.len() - held;
+            return ValueScan::Open(active.search_cursor);
+        };
+        let at = active.search_cursor + relative;
+        let rest = &invoke[at..];
+        if rest.starts_with(&active.closer) {
+            return ValueScan::Closed(at);
+        }
+        if active.closer.starts_with(rest) {
+            active.search_cursor = at;
+            return ValueScan::Open(at);
+        }
+        // The batch parser reads any value containing a tag as nested XML.
+        if rest.starts_with(TAG_OPEN) {
+            return ValueScan::Nested;
+        }
+        active.search_cursor = at + NS.len();
+    }
+}
+
+/// Backs `end` off any `&` the batch decoder could still combine with later text.
+fn entity_safe_end(text: &str, start: usize, end: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut end = end;
+    loop {
+        let from = end.saturating_sub(MAX_ENTITY_SPAN).max(start);
+        match bytes[from..end].iter().position(|&byte| byte == b'&') {
+            Some(offset) => end = from + offset,
+            None => return end,
+        }
+    }
+}
+
+fn append_value(active: &mut ActiveString, text: &str, closing: bool, output: &mut String) {
+    let raw = &text[active.value_cursor..];
+    if !active.started {
+        if !closing && raw.trim().is_empty() {
+            return;
+        }
+        output.push_str(&active.opener);
+        active.started = true;
+    }
+    let encoded = serde_json::to_string(&minimax_m3_html_unescape(raw))
+        .expect("serializing a string cannot fail");
+    output.push_str(&encoded[1..encoded.len() - 1]);
+    active.value_cursor = text.len();
 }
 
 /// Stream parser for MiniMax-M3 tool calls.
@@ -113,6 +396,7 @@ impl MiniMaxM3ToolStreamParser {
                     // value typing matches the v1 batch parser exactly.
                     config: MiniMaxM3ParserConfig::default(),
                     tools: tools.iter().map(ToolDefinition::from).collect(),
+                    partial: None,
                 },
             ),
         }
@@ -334,7 +618,8 @@ mod tests {
 
     #[test]
     fn suppresses_incomplete_invoke_at_eof() {
-        // 5.c: block start + invoke truncated mid-value never leaks.
+        // 5.c: block start + invoke truncated mid-value never leaks as text or
+        // assembles a call; the streamed prefix stays incomplete.
         let out = parse_chunks(
             &weather_tools(),
             &[
@@ -343,7 +628,9 @@ mod tests {
             ],
         );
         assert_eq!(out.normal_text, "");
-        assert!(out.calls.is_empty());
+        assert!(!out.calls.is_empty());
+        assert!(out.calls.iter().all(|call| !call.complete));
+        assert!(out.coalesce_calls().calls.is_empty());
     }
 
     #[test]
@@ -557,5 +844,288 @@ mod tests {
                 "width {width}"
             );
         }
+    }
+
+    fn string_tool(name: &str, parameters: &[&str]) -> Tool {
+        let properties: serde_json::Map<_, _> = parameters
+            .iter()
+            .map(|parameter| (parameter.to_string(), serde_json::json!({"type": "string"})))
+            .collect();
+        Tool {
+            name: name.to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object", "properties": properties}),
+            strict: None,
+        }
+    }
+
+    fn write_file_tools() -> Vec<Tool> {
+        vec![string_tool("write_file", &["path", "content"])]
+    }
+
+    fn stream_every_char(tools: &[Tool], input: &str) -> ToolParseResult {
+        let mut parser = MiniMaxM3ToolStreamParser::new(tools);
+        let mut out = ToolParseResult::default();
+        for character in input.chars() {
+            out.append(parser.push(&character.to_string()).expect("push"));
+        }
+        out.append(parser.finish().expect("finish"));
+        out
+    }
+
+    fn push_every_char(parser: &mut MiniMaxM3ToolStreamParser, input: &str) -> ToolParseResult {
+        let mut out = ToolParseResult::default();
+        for character in input.chars() {
+            out.append(parser.push(&character.to_string()).expect("push"));
+        }
+        out
+    }
+
+    fn joined_arguments(out: &ToolParseResult) -> String {
+        out.calls
+            .iter()
+            .map(|call| call.arguments.as_str())
+            .collect()
+    }
+
+    fn char_splits(input: &str) -> impl Iterator<Item = usize> + '_ {
+        (0..=input.len()).filter(|&index| input.is_char_boundary(index))
+    }
+
+    #[test]
+    fn streams_string_arguments_before_invoke_closes_at_every_char_boundary() {
+        let input = concat!(
+            "]<]minimax[>[<tool_call>\n]<]minimax[>[<invoke name=\"write_file\">\n",
+            "]<]minimax[>[<path>reasoning_plan.txt]<]minimax[>[</path>\n",
+            "]<]minimax[>[<content>\n## 发布计划\n依赖 \"core\" 与 C:\\path，",
+            "回滚窗口 30 分钟，监控告警需要覆盖全部关键指标。]<]minimax[>[</content>\n",
+            "]<]minimax[>[</invoke>\n]<]minimax[>[</tool_call>",
+        );
+        let baseline = parse_chunks(&write_file_tools(), &[input]).coalesce_calls();
+        assert_eq!(baseline.calls.len(), 1);
+
+        let invoke_close = input.find("]<]minimax[>[</invoke>").unwrap();
+        let mut parser = MiniMaxM3ToolStreamParser::new(&write_file_tools());
+        let before_close = push_every_char(&mut parser, &input[..invoke_close]);
+        assert_eq!(
+            before_close
+                .calls
+                .first()
+                .and_then(|call| call.name.as_deref()),
+            Some("write_file"),
+            "name must arrive before the invoke closes: {before_close:?}"
+        );
+
+        let content_close = input.find("]<]minimax[>[</content>").unwrap();
+        let mut parser = MiniMaxM3ToolStreamParser::new(&write_file_tools());
+        let during_value = push_every_char(&mut parser, &input[..content_close - 30]);
+        let emitted = joined_arguments(&during_value);
+        assert!(
+            emitted.starts_with(r#"{"path":"reasoning_plan.txt","content":"\n## 发布计划"#),
+            "content must stream while the value is still open: {emitted}"
+        );
+
+        let out = stream_every_char(&write_file_tools(), input);
+        assert_eq!(
+            out.calls.iter().filter(|call| call.name.is_some()).count(),
+            1,
+            "only the first update carries the name"
+        );
+        assert!(out.calls.last().expect("call updates").complete);
+        let fragments = out
+            .calls
+            .iter()
+            .filter(|call| !call.arguments.is_empty())
+            .count();
+        assert!(
+            fragments >= 10,
+            "expected many argument fragments, got {fragments}"
+        );
+        assert!(!joined_arguments(&out).contains("minimax"), "{out:?}");
+        assert_eq!(out.coalesce_calls(), baseline);
+
+        for split in char_splits(input) {
+            assert_eq!(
+                parse_chunks(&write_file_tools(), &[&input[..split], &input[split..]])
+                    .coalesce_calls(),
+                baseline,
+                "split {split}"
+            );
+        }
+    }
+
+    #[test]
+    fn streams_each_parallel_invoke_before_it_closes() {
+        let tools = vec![
+            string_tool("save_background", &["content"]),
+            string_tool("save_risks", &["content"]),
+        ];
+        let input = concat!(
+            "]<]minimax[>[<tool_call>\n",
+            "]<]minimax[>[<invoke name=\"save_background\">\n",
+            "]<]minimax[>[<content>项目背景：统一平台。]<]minimax[>[</content>\n",
+            "]<]minimax[>[</invoke>\n",
+            "]<]minimax[>[<invoke name=\"save_risks\">\n",
+            "]<]minimax[>[<content>主要风险：依赖延期与数据迁移失败。]<]minimax[>[</content>\n",
+            "]<]minimax[>[</invoke>\n",
+            "]<]minimax[>[</tool_call>",
+        );
+        let baseline = parse_chunks(&tools, &[input]).coalesce_calls();
+        assert_eq!(baseline.calls.len(), 2);
+
+        let mut parser = MiniMaxM3ToolStreamParser::new(&tools);
+        let second_value_open = input.find("主要风险").unwrap() + "主要风险".len();
+        let before = push_every_char(&mut parser, &input[..second_value_open]);
+        let second: Vec<_> = before
+            .calls
+            .iter()
+            .filter(|call| call.tool_index == 1)
+            .collect();
+        assert_eq!(
+            second.first().and_then(|call| call.name.as_deref()),
+            Some("save_risks")
+        );
+        assert!(
+            second
+                .iter()
+                .map(|call| call.arguments.as_str())
+                .collect::<String>()
+                .contains("主要风险"),
+            "second call must stream before it closes: {before:?}"
+        );
+        assert!(second.iter().all(|call| !call.complete));
+
+        assert_eq!(stream_every_char(&tools, input).coalesce_calls(), baseline);
+    }
+
+    #[test]
+    fn non_string_parameter_is_deferred_to_invoke_close() {
+        let tools = vec![Tool {
+            name: "save".to_string(),
+            description: None,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"title": {"type": "string"}, "count": {"type": "integer"}}
+            }),
+            strict: None,
+        }];
+        let string_first = concat!(
+            "]<]minimax[>[<tool_call>]<]minimax[>[<invoke name=\"save\">",
+            "]<]minimax[>[<title>quarterly report]<]minimax[>[</title>",
+            "]<]minimax[>[<count>42]<]minimax[>[</count>",
+            "]<]minimax[>[</invoke>]<]minimax[>[</tool_call>",
+        );
+        let count_open = string_first.find("42").unwrap();
+        let mut parser = MiniMaxM3ToolStreamParser::new(&tools);
+        let mut out = push_every_char(&mut parser, &string_first[..count_open + 2]);
+        assert_eq!(joined_arguments(&out), r#"{"title":"quarterly report""#);
+        out.append(parser.push(&string_first[count_open + 2..]).unwrap());
+        out.append(parser.finish().unwrap());
+        assert_eq!(
+            out.coalesce_calls().calls[0].arguments,
+            r#"{"title":"quarterly report","count":42}"#
+        );
+
+        let count_first = concat!(
+            "]<]minimax[>[<tool_call>]<]minimax[>[<invoke name=\"save\">",
+            "]<]minimax[>[<count>42]<]minimax[>[</count>",
+            "]<]minimax[>[<title>quarterly report]<]minimax[>[</title>",
+            "]<]minimax[>[</invoke>]<]minimax[>[</tool_call>",
+        );
+        let invoke_close = count_first.find("]<]minimax[>[</invoke>").unwrap();
+        let mut parser = MiniMaxM3ToolStreamParser::new(&tools);
+        assert!(
+            push_every_char(&mut parser, &count_first[..invoke_close])
+                .calls
+                .is_empty()
+        );
+        let closed = parser.push(&count_first[invoke_close..]).unwrap();
+        assert_eq!(closed.calls.len(), 1);
+        assert_eq!(
+            closed.calls[0].arguments,
+            r#"{"count":42,"title":"quarterly report"}"#
+        );
+    }
+
+    #[test]
+    fn entities_decode_like_the_batch_parser_at_every_split() {
+        let input = concat!(
+            "]<]minimax[>[<tool_call>]<]minimax[>[<invoke name=\"get_weather\">",
+            "]<]minimax[>[<location>a &amp; b &lt;x&gt; &amp;quot; &amp;lt; &#39;z&#x27; &am",
+            " tail that keeps streaming]<]minimax[>[</location>",
+            "]<]minimax[>[</invoke>]<]minimax[>[</tool_call>",
+        );
+        let baseline = parse_chunks(&weather_tools(), &[input]).coalesce_calls();
+        assert_eq!(baseline.calls.len(), 1);
+        assert_eq!(
+            stream_every_char(&weather_tools(), input).coalesce_calls(),
+            baseline
+        );
+        for split in char_splits(input) {
+            assert_eq!(
+                parse_chunks(&weather_tools(), &[&input[..split], &input[split..]])
+                    .coalesce_calls(),
+                baseline,
+                "split {split}"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_tags_in_a_string_parameter_never_stream_a_mismatched_prefix() {
+        let input = concat!(
+            "]<]minimax[>[<tool_call>]<]minimax[>[<invoke name=\"get_weather\">",
+            "]<]minimax[>[<location>\n  ]<]minimax[>[<city>Paris]<]minimax[>[</city>\n]<]minimax[>[</location>",
+            "]<]minimax[>[</invoke>]<]minimax[>[</tool_call>",
+        );
+        let baseline = parse_chunks(&weather_tools(), &[input]).coalesce_calls();
+        assert_eq!(baseline.calls.len(), 1);
+        assert_eq!(
+            stream_every_char(&weather_tools(), input).coalesce_calls(),
+            baseline
+        );
+    }
+
+    #[test]
+    fn duplicate_streamed_parameter_does_not_assemble_corrupted_arguments() {
+        let input = concat!(
+            "]<]minimax[>[<tool_call>]<]minimax[>[<invoke name=\"get_weather\">",
+            "]<]minimax[>[<location>Paris]<]minimax[>[</location>",
+            "]<]minimax[>[<location>London]<]minimax[>[</location>",
+            "]<]minimax[>[</invoke>]<]minimax[>[</tool_call>",
+        );
+        let first_value = input.find("Paris").unwrap() + "Paris".len();
+        let out = parse_chunks(
+            &weather_tools(),
+            &[&input[..first_value], &input[first_value..]],
+        );
+        assert!(
+            out.clone().coalesce_calls().calls.is_empty(),
+            "streamed duplicate parameter assembled mismatched JSON: {out:?}"
+        );
+        let complete = parse_chunks(&weather_tools(), &[input]).coalesce_calls();
+        assert_eq!(
+            complete.calls[0].arguments,
+            r#"{"location":["Paris","London"]}"#
+        );
+    }
+
+    #[test]
+    fn unknown_tool_is_emitted_only_at_invoke_close() {
+        let input = concat!(
+            "]<]minimax[>[<tool_call>]<]minimax[>[<invoke name=\"get_time\">",
+            "]<]minimax[>[<zone>UTC]<]minimax[>[</zone>",
+            "]<]minimax[>[</invoke>]<]minimax[>[</tool_call>",
+        );
+        let invoke_close = input.find("]<]minimax[>[</invoke>").unwrap();
+        let mut parser = MiniMaxM3ToolStreamParser::new(&weather_tools());
+        assert!(
+            push_every_char(&mut parser, &input[..invoke_close])
+                .calls
+                .is_empty()
+        );
+        let closed = parser.push(&input[invoke_close..]).unwrap();
+        assert_eq!(closed.calls.len(), 1);
+        assert_eq!(closed.calls[0].arguments, r#"{"zone":"UTC"}"#);
     }
 }
