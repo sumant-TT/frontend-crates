@@ -1054,9 +1054,8 @@ def _assert_reference_measurements_start_at_introduction(store):
             if G.unified_grammar_family(family) == "qwen3":
                 introduced_ids.add("UNIFIED.7-arg_string_null_ref")
             version = tuple(int(part) for part in history.captures[capture_id]["runtime_version"].split("."))
-            # Beam joined the corpus at 0.8.1; its 0.8.0 checkpoint (the pre-fix
-            # candidate) predates the shared reference scenarios.
-            introduced_at = (0, 8, 1) if family == "beam" else (0, 7, 18)
+            # Beam joined the corpus at 0.7.29.
+            introduced_at = (0, 7, 29) if family == "beam" else (0, 7, 18)
             if version < introduced_at:
                 assert not measured & introduced_ids, f"retrospective measurements in {family}/{capture_id}"
             else:

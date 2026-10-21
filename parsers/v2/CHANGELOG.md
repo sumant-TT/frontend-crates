@@ -5,46 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.10.1] - 2026-10-20
-
-### Fixed
-
-- *(parsers-v2)* Beam reads every call its serving grammar admits: a parameter may end
-  where the next one opens (no closer), tool names follow one builder/parser contract
-  (`[A-Za-z0-9_.-]+`, so `2fa_check` and `-tool` parse), and a body of complete
-  parameters at the end of the stream completes the call. `tool_no_close` is now a call
-  for Beam, as for the other families.
-
-## [0.10.0] - 2026-10-13
+## [0.7.29] - 2026-10-20
 
 ### Added
 
-- *(parsers-v2)* Beam turn grammar: a structured answer (`structured_output_schema`) is
-  framed in the final channel after the analysis (`<|channel|>final<|message|>` + JSON
-  schema), beside the tool calls under automatic choice, as the serving layer derives it.
-
-### Changed
-
-- *(parsers-v2)* `ArgumentFraming::SchemaConstrained` frames the parameters of every tool
-  the Beam serving grammar holds (`strict` or not), matching how the grammar emits them.
-
-### Removed
-
-- *(parsers-v2)* `BeamToolStreamParser` and the `beam` entry of the tool-calling registry:
-  Beam is served by its unified parser only (`create_unified_parser_for_family("beam")`).
-  `structural_tag_builder_for_family("beam")` still returns the Beam turn grammar.
-
-## [0.9.0] - 2026-10-13
-
-### Added
-
+- *(parsers-v2)* Beam unified parser family (`beam`): channel-framed reasoning, tool calls
+  (`<rfl:parameter>` bodies on the Harmony-shaped wire) and final answers; streamed
+  raw-text arguments; schema-typed arguments under `ArgumentFraming::SchemaConstrained`.
 - *(parsers-v2)* Beam structural-tag builder: the per-turn grammar the model builder's
-  serving layer derives from the Beam response template (non-empty analysis, then calls
-  with arguments held to their JSON-schema types or the answer), registered for the `beam`
-  family and asserted byte-for-byte against the serving layer's own fixtures.
-- *(parsers-v2)* `StructuralTagBuilder::build_turn` / `constrains_every_turn` and
-  `PromptChannel` for grammars that frame the whole assistant turn from the prompt's open
-  channel.
+  serving layer derives from the Beam response template, asserted byte-for-byte against
+  the serving layer's own fixtures; `StructuralTagBuilder::build_turn` /
+  `constrains_every_turn` and `PromptChannel` for grammars that frame the whole turn.
+- *(parsers-v2)* Beam reads every call its serving grammar admits: a parameter may end
+  where the next one opens, tool names follow one builder/parser contract
+  (`[A-Za-z0-9_.-]+`), a delimited call completes at EOS, and a bare header completes as
+  `{}` when the declared schema requires nothing.
+
 ## [0.7.23](https://github.com/ai-dynamo/frontend-crates/compare/dynamo-parsers-v2-v0.7.22...dynamo-parsers-v2-v0.7.23) - 2026-10-15
 
 ### Bug fixes

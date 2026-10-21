@@ -15587,8 +15587,9 @@ cases:
     description: 'Beam: a header for a strict tool with no properties, then EOS — no parameter tags, no newline, no `<|call|>`. The grammar admits it (optional body, optional closer), so the parser emits `noop({})`.'
     policy:
     - P3
-    display_id: UNIFIED.6-empty_args_no_close
-    historical_ids: []
+    display_id: UNIFIED.beam-empty_args_no_close
+    historical_ids:
+    - UNIFIED.6-empty_args_no_close
     request:
       input: <|start|>assistant to=noop<|channel|>analysis <|constrain|>xml<|message|>
       init:
@@ -15623,8 +15624,9 @@ cases:
     description: 'Beam: a header for a tool whose only property is optional, then EOS — no parameter tags, no `<|call|>`. Nothing is required, so the grammar admits the bare header and the parser emits `noop({})`; a required argument would keep this a truncation.'
     policy:
     - P3
-    display_id: UNIFIED.6-optional_args_no_close
-    historical_ids: []
+    display_id: UNIFIED.beam-optional_args_no_close
+    historical_ids:
+    - UNIFIED.6-optional_args_no_close
     request:
       input: <|start|>assistant to=noop<|channel|>analysis <|constrain|>xml<|message|>
       init:

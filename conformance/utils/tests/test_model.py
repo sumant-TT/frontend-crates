@@ -1379,7 +1379,7 @@ def test_shared_reference_cases_keep_older_peer_captures_unmeasured(model_v2: di
                         candidate["key"]
                         for candidate in dynamo_candidates
                         if candidate["key"] != "dynamo"
-                        and tuple(map(int, candidate["version"].split("."))) < (0, 8, 1)
+                        and tuple(map(int, candidate["version"].split("."))) < (0, 7, 29)
                     ],
                 )
             else:

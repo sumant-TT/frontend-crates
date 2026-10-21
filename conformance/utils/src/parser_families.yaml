@@ -211,6 +211,9 @@ markers:
 #                     already contain `<|`/`|>` (kimi) need nothing here.
 unified:
   beam:
+    # SGLang registers no Beam detectors; the harness reports the pair as unavailable.
+    capture_pipelines:
+      sglang_python: ["beam", "beam"]
     registry: beam
     native: true
     reasoning_parser: beam
@@ -419,6 +422,7 @@ unified_display:
     qwen3: 'XML function-header boundaries: Qwen3 and Nemotron 3'
     kimi: 'Single Family Test: Kimi K3 XTML'
     muse: 'Single Family Test: Muse-specific'
+    beam: 'Single Family Test: Beam-specific'
     dsml: 'DSML framing: DeepSeek V4 and V4.1 content-to-call separator'
   group_overrides:
     guided_response_rejected_header_quote_ownership: deepseek_v4
