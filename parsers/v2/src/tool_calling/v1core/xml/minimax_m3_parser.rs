@@ -249,11 +249,7 @@ fn parse_parameters(
 ) -> anyhow::Result<Map<String, Value>> {
     let parameter_start = parameter_start(config);
     let root_schema = get_arguments_config(function_name, tools).unwrap_or(&Value::Null);
-    let param_config = root_schema
-        .get("properties")
-        .filter(|value| value.is_object())
-        .unwrap_or(root_schema);
-    let mut parameters = Map::new();
+    let mut raw_parameters = Vec::new();
     let mut cursor = 0;
 
     while let Some(start_rel) = body[cursor..].find(parameter_start.as_str()) {
@@ -278,15 +274,32 @@ fn parse_parameters(
             break;
         };
         let value_end = value_start + value_end_rel;
-        let raw_value = &body[value_start..value_end];
-        let schema = param_config.get(parameter_name);
-        let value = parse_parameter_value(raw_value, schema, root_schema, config);
-        insert_parameter(&mut parameters, parameter_name.to_string(), value);
+        raw_parameters.push((parameter_name, &body[value_start..value_end]));
 
         cursor = value_end + parameter_end.len();
     }
 
+    let names: Vec<&str> = raw_parameters.iter().map(|(name, _)| *name).collect();
+    let mut parameters = Map::new();
+    for (name, raw_value) in raw_parameters {
+        let schema = parameter_schema(root_schema, name, &names);
+        let value = parse_parameter_value(raw_value, schema, root_schema, config);
+        insert_parameter(&mut parameters, name.to_string(), value);
+    }
+
     Ok(parameters)
+}
+
+// Finds a top-level parameter's schema, including parameters declared only inside union branches.
+fn parameter_schema<'a>(root_schema: &'a Value, name: &str, names: &[&str]) -> Option<&'a Value> {
+    if let Some(schema) = SchemaWalker::new(root_schema).root_property(root_schema, name, names) {
+        return Some(schema);
+    }
+    if root_schema.get("properties").is_some_and(Value::is_object) {
+        None
+    } else {
+        root_schema.get(name)
+    }
 }
 
 // Preserves duplicate XML tags by collecting repeated values into arrays.
@@ -775,6 +788,59 @@ impl<'a> SchemaWalker<'a> {
                 return None;
             }
             walker.object_child(object, tag)
+        })
+    }
+
+    // A call's parameter names pick the union branch: prefer branches declaring all of them,
+    // and leave the parameter untyped when the remaining branches disagree on its schema.
+    fn root_property(
+        &mut self,
+        schema: &'a Value,
+        name: &str,
+        names: &[&str],
+    ) -> Option<&'a Value> {
+        self.with_schema(schema, None, |walker, schema| {
+            if let Some(property) = schema.get("properties").and_then(|props| props.get(name)) {
+                return Some(property);
+            }
+            if let Some(branches) = schema.get("allOf").and_then(Value::as_array)
+                && let Some(property) = branches
+                    .iter()
+                    .find_map(|branch| walker.root_property(branch, name, names))
+            {
+                return Some(property);
+            }
+            for keyword in ["anyOf", "oneOf"] {
+                let Some(branches) = schema.get(keyword).and_then(Value::as_array) else {
+                    continue;
+                };
+                let declaring: Vec<(&'a Value, &'a Value)> = branches
+                    .iter()
+                    .filter_map(|branch| {
+                        walker
+                            .root_property(branch, name, names)
+                            .map(|property| (branch, property))
+                    })
+                    .collect();
+                let covering: Vec<&'a Value> = declaring
+                    .iter()
+                    .filter(|&&(branch, _)| {
+                        names
+                            .iter()
+                            .all(|other| walker.root_property(branch, other, names).is_some())
+                    })
+                    .map(|(_, property)| *property)
+                    .collect();
+                let candidates = if covering.is_empty() {
+                    declaring.iter().map(|(_, property)| *property).collect()
+                } else {
+                    covering
+                };
+                if let Some((first, rest)) = candidates.split_first() {
+                    return rest.iter().all(|other| other == first).then_some(*first);
+                }
+            }
+            None
         })
     }
 

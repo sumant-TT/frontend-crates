@@ -239,11 +239,7 @@ fn parse_parameters(
 ) -> anyhow::Result<Map<String, Value>> {
     let parameter_start = parameter_start(config);
     let root_schema = get_arguments_config(function_name, tools).unwrap_or(&Value::Null);
-    let param_config = root_schema
-        .get("properties")
-        .filter(|value| value.is_object())
-        .unwrap_or(root_schema);
-    let mut parameters = Map::new();
+    let mut raw_parameters = Vec::new();
     let mut cursor = 0;
 
     while let Some(start_rel) = body[cursor..].find(parameter_start.as_str()) {
@@ -268,15 +264,32 @@ fn parse_parameters(
             break;
         };
         let value_end = value_start + value_end_rel;
-        let raw_value = &body[value_start..value_end];
-        let schema = param_config.get(parameter_name);
-        let value = parse_parameter_value(raw_value, schema, root_schema, config);
-        insert_parameter(&mut parameters, parameter_name.to_string(), value);
+        raw_parameters.push((parameter_name, &body[value_start..value_end]));
 
         cursor = value_end + parameter_end.len();
     }
 
+    let names: Vec<&str> = raw_parameters.iter().map(|(name, _)| *name).collect();
+    let mut parameters = Map::new();
+    for (name, raw_value) in raw_parameters {
+        let schema = parameter_schema(root_schema, name, &names);
+        let value = parse_parameter_value(raw_value, schema, root_schema, config);
+        insert_parameter(&mut parameters, name.to_string(), value);
+    }
+
     Ok(parameters)
+}
+
+// Finds a top-level parameter's schema, including parameters declared only inside union branches.
+fn parameter_schema<'a>(root_schema: &'a Value, name: &str, names: &[&str]) -> Option<&'a Value> {
+    if let Some(schema) = SchemaWalker::new(root_schema).root_property(root_schema, name, names) {
+        return Some(schema);
+    }
+    if root_schema.get("properties").is_some_and(Value::is_object) {
+        None
+    } else {
+        root_schema.get(name)
+    }
 }
 
 // Preserves duplicate XML tags by collecting repeated values into arrays.
@@ -764,6 +777,59 @@ impl<'a> SchemaWalker<'a> {
         })
     }
 
+    // A call's parameter names pick the union branch: prefer branches declaring all of them,
+    // and leave the parameter untyped when the remaining branches disagree on its schema.
+    fn root_property(
+        &mut self,
+        schema: &'a Value,
+        name: &str,
+        names: &[&str],
+    ) -> Option<&'a Value> {
+        self.with_schema(schema, None, |walker, schema| {
+            if let Some(property) = schema.get("properties").and_then(|props| props.get(name)) {
+                return Some(property);
+            }
+            if let Some(branches) = schema.get("allOf").and_then(Value::as_array)
+                && let Some(property) = branches
+                    .iter()
+                    .find_map(|branch| walker.root_property(branch, name, names))
+            {
+                return Some(property);
+            }
+            for keyword in ["anyOf", "oneOf"] {
+                let Some(branches) = schema.get(keyword).and_then(Value::as_array) else {
+                    continue;
+                };
+                let declaring: Vec<(&'a Value, &'a Value)> = branches
+                    .iter()
+                    .filter_map(|branch| {
+                        walker
+                            .root_property(branch, name, names)
+                            .map(|property| (branch, property))
+                    })
+                    .collect();
+                let covering: Vec<&'a Value> = declaring
+                    .iter()
+                    .filter(|&&(branch, _)| {
+                        names
+                            .iter()
+                            .all(|other| walker.root_property(branch, other, names).is_some())
+                    })
+                    .map(|(_, property)| *property)
+                    .collect();
+                let candidates = if covering.is_empty() {
+                    declaring.iter().map(|(_, property)| *property).collect()
+                } else {
+                    covering
+                };
+                if let Some((first, rest)) = candidates.split_first() {
+                    return rest.iter().all(|other| other == first).then_some(*first);
+                }
+            }
+            None
+        })
+    }
+
     fn permits_null(&mut self, schema: &'a Value) -> bool {
         let permitted = self.with_schema(schema, true, |walker, schema| {
             if let Some(allowed) = schema.as_bool() {
@@ -909,6 +975,113 @@ mod tests {
         assert_eq!(calls.len(), 1);
         let (_, args) = call_name_and_args(&calls[0]);
         assert_eq!(args, serde_json::json!({"pattern": "null", "path": null}));
+    }
+
+    fn parse_args_with_schema(parameters: Value, invokes: &[&str]) -> Vec<Value> {
+        let tools = vec![ToolDefinition {
+            name: "f".into(),
+            parameters: Some(parameters),
+            strict: None,
+        }];
+        let input = format!(
+            "]<]minimax[>[<tool_call>{}]<]minimax[>[</tool_call>",
+            invokes
+                .iter()
+                .map(|body| format!("]<]minimax[>[<invoke name=\"f\">{body}]<]minimax[>[</invoke>"))
+                .collect::<String>()
+        );
+        let (calls, _) =
+            try_tool_call_parse_minimax_m3(&input, &MiniMaxM3ParserConfig::default(), Some(&tools))
+                .unwrap();
+        calls
+            .iter()
+            .map(|call| call_name_and_args(call).1)
+            .collect()
+    }
+
+    #[test]
+    fn top_level_union_branches_type_their_parameters() {
+        let branches = serde_json::json!([
+            {"type": "object", "additionalProperties": false,
+             "properties": {"number": {"type": "number"}}},
+            {"type": "object", "additionalProperties": false,
+             "properties": {"stringList": {"type": "array", "items": {"type": "string"}}}},
+            {"type": "object", "additionalProperties": false,
+             "properties": {"numberList": {"type": "array", "items": {"type": "number"}}}}
+        ]);
+        let invokes = [
+            "]<]minimax[>[<number>42]<]minimax[>[</number>",
+            concat!(
+                "]<]minimax[>[<stringList>]<]minimax[>[<item>12]<]minimax[>[</item>",
+                "]<]minimax[>[<item>34]<]minimax[>[</item>]<]minimax[>[</stringList>"
+            ),
+            concat!(
+                "]<]minimax[>[<numberList>]<]minimax[>[<item>12]<]minimax[>[</item>",
+                "]<]minimax[>[<item>34]<]minimax[>[</item>]<]minimax[>[</numberList>"
+            ),
+        ];
+        for union in ["oneOf", "anyOf", "allOf"] {
+            let schema = serde_json::json!({"type": "object", union: branches});
+            assert_eq!(
+                parse_args_with_schema(schema, &invokes),
+                vec![
+                    serde_json::json!({"number": 42}),
+                    serde_json::json!({"stringList": ["12", "34"]}),
+                    serde_json::json!({"numberList": [12, 34]}),
+                ],
+                "{union}"
+            );
+        }
+    }
+
+    #[test]
+    fn top_level_union_resolves_branch_references() {
+        let schema = serde_json::json!({
+            "$defs": {"Count": {"type": "object", "properties": {"count": {"type": "integer"}}}},
+            "oneOf": [{"$ref": "#/$defs/Count"}, {"type": "null"}]
+        });
+        let args = parse_args_with_schema(schema, &["]<]minimax[>[<count>3]<]minimax[>[</count>"]);
+        assert_eq!(args, vec![serde_json::json!({"count": 3})]);
+    }
+
+    #[test]
+    fn top_level_union_complements_top_level_properties() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"label": {"type": "string"}},
+            "oneOf": [{"properties": {"count": {"type": "integer"}}}]
+        });
+        let args = parse_args_with_schema(
+            schema,
+            &[
+                "]<]minimax[>[<label>7]<]minimax[>[</label>]<]minimax[>[<count>3]<]minimax[>[</count>",
+            ],
+        );
+        assert_eq!(args, vec![serde_json::json!({"label": "7", "count": 3})]);
+    }
+
+    #[test]
+    fn top_level_union_picks_the_branch_covering_every_parameter() {
+        let schema = serde_json::json!({"oneOf": [
+            {"properties": {"id": {"type": "string"}, "name": {"type": "string"}}},
+            {"properties": {"id": {"type": "integer"}, "count": {"type": "integer"}}}
+        ]});
+        let args = parse_args_with_schema(
+            schema,
+            &[
+                "]<]minimax[>[<id>7]<]minimax[>[</id>]<]minimax[>[<count>3]<]minimax[>[</count>",
+                "]<]minimax[>[<id>7]<]minimax[>[</id>]<]minimax[>[<name>x]<]minimax[>[</name>",
+                "]<]minimax[>[<id>7]<]minimax[>[</id>",
+            ],
+        );
+        assert_eq!(
+            args,
+            vec![
+                serde_json::json!({"id": 7, "count": 3}),
+                serde_json::json!({"id": "7", "name": "x"}),
+                serde_json::json!({"id": "7"}),
+            ]
+        );
     }
 
     #[test]

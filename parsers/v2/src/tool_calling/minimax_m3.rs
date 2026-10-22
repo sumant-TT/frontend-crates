@@ -479,6 +479,57 @@ mod tests {
     }
 
     #[test]
+    fn top_level_one_of_branches_type_their_parameters() {
+        let tools = vec![Tool {
+            name: "ExampleFunction".into(),
+            description: None,
+            parameters: serde_json::json!({"type": "object", "oneOf": [
+                {"type": "object", "additionalProperties": false,
+                 "properties": {"number": {"type": "number"}}},
+                {"type": "object", "additionalProperties": false,
+                 "properties": {"stringList": {"type": "array", "items": {"type": "string"}}}},
+                {"type": "object", "additionalProperties": false,
+                 "properties": {"numberList": {"type": "array", "items": {"type": "number"}}}}
+            ]}),
+            strict: None,
+        }];
+        let input = concat!(
+            "]<]minimax[>[<tool_call>\n",
+            "]<]minimax[>[<invoke name=\"ExampleFunction\">",
+            "]<]minimax[>[<number>42]<]minimax[>[</number>]<]minimax[>[</invoke>\n",
+            "]<]minimax[>[<invoke name=\"ExampleFunction\">]<]minimax[>[<stringList>",
+            "]<]minimax[>[<item>12]<]minimax[>[</item>]<]minimax[>[<item>34]<]minimax[>[</item>",
+            "]<]minimax[>[</stringList>]<]minimax[>[</invoke>\n",
+            "]<]minimax[>[<invoke name=\"ExampleFunction\">]<]minimax[>[<numberList>",
+            "]<]minimax[>[<item>12]<]minimax[>[</item>]<]minimax[>[<item>34]<]minimax[>[</item>",
+            "]<]minimax[>[</numberList>]<]minimax[>[</invoke>\n",
+            "]<]minimax[>[</tool_call>"
+        );
+        for width in [1, input.len()] {
+            let chunks: Vec<_> = input
+                .as_bytes()
+                .chunks(width)
+                .map(|chunk| std::str::from_utf8(chunk).unwrap())
+                .collect();
+            let merged = parse_chunks(&tools, &chunks).coalesce_calls();
+            let args: Vec<serde_json::Value> = merged
+                .calls
+                .iter()
+                .map(|call| serde_json::from_str(&call.arguments).unwrap())
+                .collect();
+            assert_eq!(
+                args,
+                vec![
+                    serde_json::json!({"number": 42}),
+                    serde_json::json!({"stringList": ["12", "34"]}),
+                    serde_json::json!({"numberList": [12, 34]}),
+                ],
+                "width {width}"
+            );
+        }
+    }
+
+    #[test]
     fn literal_null_branch_does_not_erase_nested_integer_type() {
         for union in ["anyOf", "oneOf"] {
             for alternative in [
